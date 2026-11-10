@@ -1772,6 +1772,10 @@ fn read_control_file(control: &Path) -> Option<Request> {
 /// pane with the document's name. A `None` key clears the token — showing
 /// nothing must not look like a preview of the empty path.
 fn report_identity(mode: &ViewMode, doc_key: Option<&str>, control: &Path) {
+    report_identity_as(&mode_pane_label(mode), doc_key, control);
+}
+
+fn report_identity_as(label: &str, doc_key: Option<&str>, control: &Path) {
     let Ok(pane_id) = std::env::var("HERDR_PANE_ID") else {
         return;
     };
@@ -1803,7 +1807,7 @@ fn report_identity(mode: &ViewMode, doc_key: Option<&str>, control: &Path) {
     );
     let _ = ipc::call_text(
         "pane.rename",
-        serde_json::json!({ "pane_id": pane_id, "label": mode_pane_label(mode) }),
+        serde_json::json!({ "pane_id": pane_id, "label": label }),
     );
     let Some(doc_key) = doc_key else { return };
     // The tab is the user's, not the document's, when we share it.
@@ -2048,6 +2052,63 @@ fn sweep_orphan_controls_in(dir: &Path, previews: &[PreviewPane]) {
 
 /// Re-stamp every 5s of wall-clock time, and immediately after the clock
 /// jumps backwards (a correction must not silence the heartbeat).
+/// The argv `e` hands a file to: the configured terminal editor (Settings,
+/// `HERDR_SIDEBAR_EDITOR`, `VISUAL` or `EDITOR`), or `None` for the built-in
+/// editor when none is configured.
+fn edit_handoff(command: Option<&str>, file: &Path) -> std::io::Result<Option<Vec<String>>> {
+    command
+        .map(|command| crate::actions::editor_argv(command, file))
+        .transpose()
+}
+
+/// Run a terminal editor in this pane: hand the terminal over, keep the
+/// pane's identity fresh so the sidebar does not take the preview for dead
+/// while the editor is open, then take the terminal back.
+fn run_editor_in_place(
+    argv: &[String],
+    label: String,
+    doc_key: Option<String>,
+    control: &Path,
+) -> std::io::Result<()> {
+    crossterm::execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        crossterm::terminal::LeaveAlternateScreen
+    )?;
+    crossterm::terminal::disable_raw_mode()?;
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+    let control = control.to_path_buf();
+    let heartbeat = std::thread::spawn(move || {
+        while let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+            stop_rx.recv_timeout(Duration::from_secs(5))
+        {
+            report_identity_as(&label, doc_key.as_deref(), &control);
+        }
+    });
+    let status = std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .status();
+    let _ = stop_tx.send(());
+    let _ = heartbeat.join();
+
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::EnterAlternateScreen,
+        EnableMouseCapture
+    )?;
+    let status = status?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "{} exited with {status}",
+            argv[0]
+        )))
+    }
+}
+
 fn heartbeat_due(last: u64, now: u64) -> bool {
     now < last || now - last >= 5
 }
@@ -2336,24 +2397,48 @@ pub fn run(control: &Path) -> std::io::Result<()> {
                                         }
                                         if doc.media.is_some() {
                                             notice = Some("media previews are read-only".into());
-                                        } else if let Some(Request::File { path, .. }) =
+                                        } else if let Some(request @ Request::File { path, .. }) =
                                             current.as_ref()
                                         {
-                                            match Editor::open(path, MAX_BYTES, MAX_LINES) {
-                                                Ok(editor) => {
-                                                    mode = ViewMode::Edit(editor);
-                                                    preview_load = None;
-                                                    notice = None;
-                                                    report_identity(
-                                                        &mode,
-                                                        current
-                                                            .as_ref()
-                                                            .map(Request::doc_key)
-                                                            .as_deref(),
+                                            let command = crate::actions::configured_editor();
+                                            match edit_handoff(command.as_deref(), path) {
+                                                Err(e) => {
+                                                    notice = Some(format!("editor command: {e}"))
+                                                }
+                                                Ok(Some(argv)) => {
+                                                    let label = editor_pane_label(&doc.name);
+                                                    let outcome = run_editor_in_place(
+                                                        &argv,
+                                                        label,
+                                                        Some(request.doc_key()),
                                                         control,
                                                     );
+                                                    // Whatever the editor did, redraw everything
+                                                    // and re-read the file it may have changed.
+                                                    let _ = terminal.clear();
+                                                    preview_load =
+                                                        Some(start_preview_load(request.clone()));
+                                                    identity_pending = true;
+                                                    notice = outcome.err().map(|e| e.to_string());
                                                 }
-                                                Err(e) => notice = Some(e.to_string()),
+                                                Ok(None) => {
+                                                    match Editor::open(path, MAX_BYTES, MAX_LINES) {
+                                                        Ok(editor) => {
+                                                            mode = ViewMode::Edit(editor);
+                                                            preview_load = None;
+                                                            notice = None;
+                                                            report_identity(
+                                                                &mode,
+                                                                current
+                                                                    .as_ref()
+                                                                    .map(Request::doc_key)
+                                                                    .as_deref(),
+                                                                control,
+                                                            );
+                                                        }
+                                                        Err(e) => notice = Some(e.to_string()),
+                                                    }
+                                                }
                                             }
                                         } else {
                                             notice = Some(
@@ -3781,6 +3866,33 @@ fn side_neighbor(layout_json: &str, pane_id: &str, on_the_left: bool) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_hands_off_to_the_configured_terminal_editor() {
+        let file = Path::new("/ws/src/main.rs");
+        assert_eq!(
+            edit_handoff(None, file).unwrap(),
+            None,
+            "no editor: built-in"
+        );
+        assert_eq!(
+            edit_handoff(Some("nvim"), file).unwrap(),
+            Some(vec!["nvim".to_string(), "/ws/src/main.rs".to_string()])
+        );
+        assert_eq!(
+            edit_handoff(Some("nvim +{line} {file}"), file).unwrap(),
+            Some(vec![
+                "nvim".to_string(),
+                "+{line}".to_string(),
+                "/ws/src/main.rs".to_string()
+            ]),
+            "a {{file}} placeholder is filled in place"
+        );
+        assert!(
+            edit_handoff(Some("\"unterminated"), file).is_err(),
+            "a broken command is reported, not silently swapped for the built-in editor"
+        );
+    }
 
     fn doc_of(lines: Vec<Line<'static>>, numbered: bool) -> Doc {
         Doc {

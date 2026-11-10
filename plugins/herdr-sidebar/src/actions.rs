@@ -494,7 +494,7 @@ pub fn configured_editor() -> Option<String> {
     })
 }
 
-fn editor_argv(command: &str, file: &Path) -> io::Result<Vec<String>> {
+pub(crate) fn editor_argv(command: &str, file: &Path) -> io::Result<Vec<String>> {
     let mut argv = split_editor_command(command)?;
     if argv.is_empty() {
         return Err(io::Error::new(

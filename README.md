@@ -55,7 +55,9 @@ Use the mouse or press `1`, `2`, and `3`.
 - Stage files or folders from the tree without crossing nested-repository boundaries.
 - Opt into a terminal editor for mouse clicks, while Enter keeps the built-in preview.
 - Press `e` in a text preview for the experimental editor with selection, find,
-  clipboard actions, explicit save, and external-change protection.
+  clipboard actions, explicit save, and external-change protection. With a terminal
+  editor configured, `e` runs it in the preview pane instead, and quitting it returns
+  to the reloaded preview.
 
 **Takeover caveat:** after a herdr restart or an incomplete restore, move any remaining
 working panes back manually. Third-party TUIs are not yet verified with takeover;
