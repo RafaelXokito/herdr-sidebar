@@ -54,6 +54,32 @@ pub struct RepoStatus {
     pub ignored: Vec<String>,
 }
 
+/// One repository's untracked and ignored roots, repo-relative, for the
+/// Explorer's "hide untracked" filter.
+pub struct UntrackedScan {
+    pub root: PathBuf,
+    pub untracked: Vec<String>,
+    pub ignored: Vec<String>,
+}
+
+/// Absolute roots of every path git does not track, across `repos`. A path
+/// that is itself one of the repo roots is kept out: the outer repo reports an
+/// embedded repository as an untracked folder, but its files are tracked by
+/// the inner one.
+pub fn hidden_roots(repos: &[UntrackedScan]) -> Vec<PathBuf> {
+    let repo_roots: Vec<&Path> = repos.iter().map(|repo| repo.root.as_path()).collect();
+    repos
+        .iter()
+        .flat_map(|repo| {
+            repo.untracked
+                .iter()
+                .chain(&repo.ignored)
+                .map(|rel| abs(&repo.root, rel))
+        })
+        .filter(|path| !repo_roots.contains(&path.as_path()))
+        .collect()
+}
+
 #[derive(Default)]
 pub struct Decorations {
     /// Changed FILES (every path git named directly), by absolute path.
@@ -166,6 +192,50 @@ mod tests {
 
     fn at(deco: &Decorations, rel: &str, is_dir: bool) -> Option<char> {
         deco.letter(&abs(&root(), rel), is_dir)
+    }
+
+    #[test]
+    fn hidden_roots_merge_untracked_and_ignored_across_repos() {
+        let roots = hidden_roots(&[
+            UntrackedScan {
+                root: PathBuf::from("/ws"),
+                untracked: vec!["notes".into(), "src/scratch.rs".into()],
+                ignored: vec!["target".into()],
+            },
+            UntrackedScan {
+                root: PathBuf::from("/ws/libs/other"),
+                untracked: vec!["tmp.txt".into()],
+                ignored: vec![],
+            },
+        ]);
+        assert_eq!(
+            roots,
+            [
+                abs(&root(), "notes"),
+                abs(&root(), "src/scratch.rs"),
+                abs(&root(), "target"),
+                abs(&root(), "libs/other/tmp.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn hidden_roots_never_hide_a_discovered_repo() {
+        // The outer repo sees an embedded repo as an untracked folder; hiding
+        // it would hide every tracked file of the inner repo too.
+        let roots = hidden_roots(&[
+            UntrackedScan {
+                root: PathBuf::from("/ws"),
+                untracked: vec!["vendor/lib".into(), "junk".into()],
+                ignored: vec![],
+            },
+            UntrackedScan {
+                root: PathBuf::from("/ws/vendor/lib"),
+                untracked: vec![],
+                ignored: vec![],
+            },
+        ]);
+        assert_eq!(roots, [abs(&root(), "junk")]);
     }
 
     #[test]

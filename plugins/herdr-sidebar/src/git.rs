@@ -263,6 +263,25 @@ impl Git {
         Ok(parse_ignored(&out))
     }
 
+    /// Repo-relative roots of untracked (not ignored) paths, for the
+    /// Explorer's "hide untracked" filter. Like [`Git::ignored`], `--directory`
+    /// reports a folder holding nothing tracked as one root instead of every
+    /// file under it, so the filter can drop the whole folder.
+    pub fn untracked(&self) -> Result<Vec<String>, String> {
+        let out = run_read_in_with_timeout(
+            &self.root,
+            &[
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ],
+            IGNORED_SCAN_TIMEOUT,
+        )?;
+        Ok(parse_ignored(&out))
+    }
+
     /// The repository that OWNS `path`: the NEAREST enclosing repo, found by
     /// git's own upward walk. A path inside a nested repository therefore
     /// belongs to the nested repo, never to the parent — the boundary rule
@@ -2024,6 +2043,29 @@ mod tests {
         let outside = std::env::temp_dir().join("stage-boundary-other");
         let error = git.stage_under(&outside).unwrap_err();
         assert!(error.contains("outside repository"), "{error}");
+    }
+
+    #[test]
+    fn untracked_lists_new_files_and_collapses_wholly_untracked_dirs() {
+        let git = repo_with_head("untracked");
+        std::fs::write(git.root.join(".gitignore"), "target/\n").unwrap();
+        std::fs::create_dir_all(git.root.join("src")).unwrap();
+        std::fs::write(git.root.join("src/lib.rs"), "fn main() {}").unwrap();
+        run_in(&git.root, &["add", ".gitignore", "src/lib.rs"]).unwrap();
+        std::fs::write(git.root.join("src/scratch.rs"), "").unwrap();
+        std::fs::create_dir_all(git.root.join("notes/deep")).unwrap();
+        std::fs::write(git.root.join("notes/deep/todo.md"), "").unwrap();
+        std::fs::create_dir_all(git.root.join("target")).unwrap();
+        std::fs::write(git.root.join("target/app"), "bin").unwrap();
+
+        let mut untracked = git.untracked().unwrap();
+        untracked.sort();
+        assert_eq!(
+            untracked,
+            ["notes", "src/scratch.rs"],
+            "staged files count as tracked, ignored ones are left to ignored()"
+        );
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 
     #[test]

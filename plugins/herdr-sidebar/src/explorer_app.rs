@@ -20,7 +20,7 @@ use unicode_width::UnicodeWidthChar;
 use herdr_sidebar::actions::{self, MenuAction, MenuEntry};
 use herdr_sidebar::branch_ui::{BranchPicker, FooterZones, PickerAction, draw_git_footer};
 use herdr_sidebar::git::{Git, Status};
-use herdr_sidebar::gitdeco::{Decorations, RepoStatus};
+use herdr_sidebar::gitdeco::{Decorations, RepoStatus, UntrackedScan, hidden_roots};
 use herdr_sidebar::icons::{IconTheme, icon};
 use herdr_sidebar::ipc;
 use herdr_sidebar::state::{self as sidebar, View};
@@ -50,6 +50,8 @@ struct RepoDecorationRefresh {
     ignored: Option<Vec<String>>,
     ignored_attempted: bool,
     ignored_degraded: bool,
+    /// Only scanned while the Explorer hides untracked files.
+    untracked: Option<Vec<String>>,
 }
 
 struct DecorationRefresh {
@@ -297,6 +299,7 @@ enum Setting {
     FocusOnOpen,
     FollowCwd,
     HiddenFiles,
+    UntrackedFiles,
     Hotkeys,
     GitDecorations,
     GitFooter,
@@ -625,7 +628,10 @@ impl App {
     /// focused; explicit refresh/stage actions pass `force = true`.
     fn request_decorations(&mut self, force: bool) {
         self.last_deco = std::time::Instant::now();
-        if !self.sidebar_state.git_deco && !self.sidebar_state.show_git_footer {
+        if !self.sidebar_state.git_deco
+            && !self.sidebar_state.show_git_footer
+            && !self.tree.hide_untracked
+        {
             self.deco = Decorations::empty();
             self.deco_rx = None;
             self.git_footer_status = None;
@@ -638,7 +644,8 @@ impl App {
         }
         let ignored_backoffs = self.deco_backoff_until.clone();
         let scan_now = std::time::Instant::now();
-        let include_ignored = self.sidebar_state.git_deco;
+        let include_ignored = self.sidebar_state.git_deco || self.tree.hide_untracked;
+        let include_untracked = self.tree.hide_untracked;
         let repos = self.repos.clone();
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -657,11 +664,17 @@ impl App {
                     } else {
                         (None, false)
                     };
+                    let untracked = if include_untracked {
+                        repo.untracked().ok()
+                    } else {
+                        None
+                    };
                     Some(RepoDecorationRefresh {
                         root,
                         ignored,
                         ignored_attempted,
                         ignored_degraded,
+                        untracked,
                         status,
                     })
                 })
@@ -677,6 +690,8 @@ impl App {
             Ok(refresh) => {
                 self.git_footer_status = refresh.repos.first().map(|repo| repo.status.clone());
                 let mut statuses = Vec::with_capacity(refresh.repos.len());
+                let mut scans = Vec::with_capacity(refresh.repos.len());
+                let mut scans_complete = true;
                 for repo in refresh.repos {
                     if let Some(ignored) = &repo.ignored {
                         self.ignored_cache
@@ -692,16 +707,33 @@ impl App {
                             self.deco_backoff_until.remove(&repo.root);
                         }
                     }
-                    statuses.push(RepoStatus {
-                        ignored: repo.ignored.unwrap_or_else(|| {
-                            self.ignored_cache
-                                .get(&repo.root)
-                                .cloned()
-                                .unwrap_or_default()
+                    let ignored = repo.ignored.unwrap_or_else(|| {
+                        self.ignored_cache
+                            .get(&repo.root)
+                            .cloned()
+                            .unwrap_or_default()
+                    });
+                    match repo.untracked {
+                        Some(untracked) => scans.push(UntrackedScan {
+                            root: repo.root.clone(),
+                            untracked,
+                            ignored: ignored.clone(),
                         }),
+                        None => scans_complete = false,
+                    }
+                    statuses.push(RepoStatus {
+                        ignored,
                         root: repo.root,
                         status: repo.status,
                     });
+                }
+                // A failed scan keeps the last filter rather than flashing
+                // every untracked file back into view.
+                if self.tree.hide_untracked
+                    && scans_complete
+                    && self.tree.set_excluded(hidden_roots(&scans))
+                {
+                    self.rebuild();
                 }
                 self.deco = if self.sidebar_state.git_deco {
                     Decorations::build(&statuses)
@@ -728,11 +760,26 @@ impl App {
     /// or an explicit refresh that may have added or removed one.
     fn rediscover_repos(&mut self) {
         self.deco_rx = None;
-        self.repos = if self.sidebar_state.git_deco || self.sidebar_state.show_git_footer {
+        self.repos = if self.sidebar_state.git_deco
+            || self.sidebar_state.show_git_footer
+            || self.tree.hide_untracked
+        {
             Git::discover_all(&self.tree.root_path())
         } else {
             Vec::new()
         };
+    }
+
+    /// Show or hide files git does not track (untracked and ignored). Rows
+    /// drop out once the background scan reports which paths those are.
+    fn toggle_untracked(&mut self) {
+        self.tree.hide_untracked = !self.tree.hide_untracked;
+        if !self.tree.hide_untracked {
+            self.tree.set_excluded(Vec::new());
+        }
+        self.rediscover_repos();
+        self.request_decorations(true);
+        self.rebuild();
     }
 
     /// The decoration letter for a row, if any (see [`Decorations::letter`]).
@@ -1144,6 +1191,7 @@ impl App {
                 self.invalidate_quick_index();
                 self.rebuild();
             }
+            KeyCode::Char('u') => self.toggle_untracked(),
             KeyCode::Char('i') => self.set_theme(self.theme.toggled()),
             KeyCode::Char('b') => self.hide(),
             KeyCode::Char('c') => self.change_folder_dialog(),
@@ -2494,6 +2542,17 @@ impl App {
                 true,
             ),
             (
+                Setting::UntrackedFiles,
+                "Untracked files",
+                if self.tree.hide_untracked {
+                    "hidden"
+                } else {
+                    "shown"
+                }
+                .to_string(),
+                true,
+            ),
+            (
                 Setting::Hotkeys,
                 "Footer hotkeys",
                 if self.show_hotkeys() {
@@ -2630,6 +2689,7 @@ impl App {
                 self.invalidate_quick_index();
                 self.rebuild();
             }
+            Setting::UntrackedFiles => self.toggle_untracked(),
             Setting::Hotkeys => {
                 self.sidebar_state =
                     sidebar::update_state(|state| state.show_hotkeys = !state.show_hotkeys);
@@ -3445,6 +3505,7 @@ impl App {
             ("⏎", "toggle"),
             ("r", "refresh"),
             (".", "dotfiles"),
+            ("u", "untracked"),
             ("c", "folder"),
             ("ctrl+p", "files"),
             ("ctrl+f", "text"),

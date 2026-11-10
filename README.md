@@ -99,7 +99,7 @@ Settings persist across tabs and restarts. Configure:
 - Material/emoji icons and VS Code/light/terminal colors
 - Tab (default), split-pane, or temporary takeover previews and optional custom editor
 - Source Control list/tree view (shared across sidebars)
-- Hidden files, Git decorations, Git footer, and footer hotkeys
+- Hidden files, untracked/ignored files, Git decorations, Git footer, and footer hotkeys
 - Auto-open, strict open/close toggle, focus-on-open, and live folder following
 
 The sidebar follows a neighbouring pane's working directory by default. A manually chosen
@@ -115,6 +115,7 @@ folder stays put until that pane changes directory again.
 | `Ctrl+P` | quick open | `A` | draft message |
 | `Ctrl+F` | content search | `S` | sync |
 | `.` | hidden files | `o` | open diff |
+| `u` | untracked + ignored files | | |
 | `r` | refresh | `r` | refresh |
 | `m` | context menu | `m` | context menu |
 | `s` | settings | `s` | settings |

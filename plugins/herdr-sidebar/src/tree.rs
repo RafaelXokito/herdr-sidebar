@@ -29,6 +29,10 @@ pub struct Tree {
     expanded: BTreeSet<PathBuf>,
     cache: HashMap<PathBuf, Vec<Entry>>,
     pub show_hidden: bool,
+    /// Hide rows git does not track (untracked or ignored), using the roots
+    /// last handed to [`Tree::set_excluded`].
+    pub hide_untracked: bool,
+    excluded: Vec<PathBuf>,
 }
 
 impl Tree {
@@ -38,7 +42,23 @@ impl Tree {
             expanded: BTreeSet::new(),
             cache: HashMap::new(),
             show_hidden: true,
+            hide_untracked: false,
+            excluded: Vec::new(),
         }
+    }
+
+    /// Replace the untracked/ignored roots `hide_untracked` filters by.
+    /// Returns whether they changed, so callers rebuild rows only when needed.
+    pub fn set_excluded(&mut self, roots: Vec<PathBuf>) -> bool {
+        if self.excluded == roots {
+            return false;
+        }
+        self.excluded = roots;
+        true
+    }
+
+    fn is_excluded(&self, path: &Path) -> bool {
+        self.hide_untracked && self.excluded.iter().any(|root| path.starts_with(root))
     }
 
     /// The workspace root directory the tree is rooted at.
@@ -143,6 +163,9 @@ impl Tree {
                 continue;
             }
             let path = dir.join(&entry.name);
+            if self.is_excluded(&path) {
+                continue;
+            }
             let expanded = entry.is_dir && self.is_expanded(&path);
             out.push(Row {
                 name: entry.name,
@@ -204,6 +227,54 @@ mod tests {
 
     fn names(rows: &[Row]) -> Vec<(String, usize)> {
         rows.iter().map(|r| (r.name.clone(), r.depth)).collect()
+    }
+
+    #[test]
+    fn hide_untracked_drops_rows_under_excluded_roots() {
+        let tmp = TempDir::new("untracked");
+        tmp.mkdir("src");
+        tmp.mkdir("scratch");
+        tmp.touch("src/lib.rs");
+        tmp.touch("src/notes.md");
+        tmp.touch("scratch/a.txt");
+        tmp.touch("README.md");
+        let mut tree = Tree::new(tmp.0.clone());
+        tree.expand(&tmp.0.join("src"));
+        tree.set_excluded(vec![tmp.0.join("scratch"), tmp.0.join("src/notes.md")]);
+
+        // Off by default: the excluded set alone changes nothing.
+        assert_eq!(
+            names(&tree.rows()),
+            [
+                ("scratch".into(), 0),
+                ("src".into(), 0),
+                ("lib.rs".into(), 1),
+                ("notes.md".into(), 1),
+                ("README.md".into(), 0),
+            ]
+        );
+
+        tree.hide_untracked = true;
+        assert_eq!(
+            names(&tree.rows()),
+            [
+                ("src".into(), 0),
+                ("lib.rs".into(), 1),
+                ("README.md".into(), 0),
+            ],
+            "an excluded folder and an excluded file both disappear"
+        );
+    }
+
+    #[test]
+    fn excluded_roots_do_not_hide_a_sibling_sharing_a_name_prefix() {
+        let tmp = TempDir::new("untracked-prefix");
+        tmp.touch("build");
+        tmp.touch("build.rs");
+        let mut tree = Tree::new(tmp.0.clone());
+        tree.set_excluded(vec![tmp.0.join("build")]);
+        tree.hide_untracked = true;
+        assert_eq!(names(&tree.rows()), [("build.rs".into(), 0)]);
     }
 
     #[test]
