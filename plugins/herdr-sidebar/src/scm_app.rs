@@ -47,6 +47,16 @@ const REPO_HEADER_ACTIONS: &str = " ⇅  ✓ ";
 /// a diff/show tab), matching the file explorer.
 const DOUBLE_CLICK: std::time::Duration = std::time::Duration::from_millis(450);
 
+/// "Stage all" stages what the list shows: with untracked files hidden, only
+/// changes to tracked files, so nothing invisible lands in the next commit.
+fn stage_shown(git: &Git, hide_untracked: bool) -> Result<(), String> {
+    if hide_untracked {
+        git.stage_tracked()
+    } else {
+        git.stage_all()
+    }
+}
+
 fn sync_is_primary(status: &Status) -> bool {
     status.staged.is_empty()
         && status.unstaged.is_empty()
@@ -770,6 +780,7 @@ enum Setting {
     Hotkeys,
     Folder,
     ScmViewMode,
+    UntrackedFiles,
 }
 
 /// (setting, label, current value, enabled) — disabled rows render dimmed and
@@ -1210,8 +1221,12 @@ impl App {
     /// periodic ticks don't eat notices.
     pub fn refresh(&mut self) {
         let mut error = None;
+        let hide_untracked = self.sidebar_state.hide_untracked;
         for repo in &mut self.repos {
             match repo.git.status() {
+                // Hidden at the source, so every list, count and bulk action
+                // (discard all included) only ever sees what is on screen.
+                Ok(status) if hide_untracked => repo.status = status.without_untracked(),
                 Ok(status) => repo.status = status,
                 Err(e) => error = Some(e),
             }
@@ -1312,6 +1327,11 @@ impl App {
         self.sidebar_state.dock_right = shared.dock_right;
         self.sidebar_state.strict_toggle = shared.strict_toggle;
         self.sidebar_state.focus_on_open = shared.focus_on_open;
+        if shared.hide_untracked != self.sidebar_state.hide_untracked {
+            // Toggled from the Explorer or another Source Control pane.
+            self.sidebar_state.hide_untracked = shared.hide_untracked;
+            self.refresh();
+        }
         if shared.scm_tree_view != self.tree_view {
             // Toggled from another pane (separated view, a preview tab).
             self.tree_view = shared.scm_tree_view;
@@ -2616,6 +2636,17 @@ impl App {
                 true,
             ),
             (
+                Setting::UntrackedFiles,
+                "Untracked files",
+                if self.sidebar_state.hide_untracked {
+                    "hidden"
+                } else {
+                    "shown"
+                }
+                .to_string(),
+                true,
+            ),
+            (
                 Setting::Folder,
                 "Change folder…",
                 self.cwd
@@ -2643,6 +2674,12 @@ impl App {
                 });
             }
             Setting::ScmViewMode => self.toggle_tree_view(),
+            Setting::UntrackedFiles => {
+                self.sidebar_state = sidebar::update_state(|state| {
+                    state.hide_untracked = !state.hide_untracked;
+                });
+                self.refresh();
+            }
             Setting::UnifiedSidebar => {
                 // The pane layout changes underneath the modal; close it.
                 self.overlay = None;
@@ -3144,11 +3181,17 @@ impl App {
                 self.overlay = Some(Overlay::ConfirmDiscardAll { repo });
             }
             ChangesHeaderAction::Stash => {
-                self.run_git(repo, &["stash", "push", "--include-untracked"]);
+                // Hidden untracked files are not part of the visible changes,
+                // so they stay out of the stash too.
+                if self.sidebar_state.hide_untracked {
+                    self.run_git(repo, &["stash", "push"]);
+                } else {
+                    self.run_git(repo, &["stash", "push", "--include-untracked"]);
+                }
             }
             ChangesHeaderAction::Stage => {
                 if let Some(repo) = self.repos.get(repo)
-                    && let Err(error) = repo.git.stage_all()
+                    && let Err(error) = stage_shown(&repo.git, self.sidebar_state.hide_untracked)
                 {
                     self.flash = Some((error, true));
                 }
@@ -3691,7 +3734,7 @@ impl App {
         let Some(repo) = self.active_repo() else {
             return;
         };
-        if let Err(e) = repo.git.stage_all() {
+        if let Err(e) = stage_shown(&repo.git, self.sidebar_state.hide_untracked) {
             self.flash = Some((e, true));
         }
         self.refresh();

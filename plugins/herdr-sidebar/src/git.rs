@@ -36,6 +36,19 @@ pub struct Status {
     pub has_upstream: bool,
 }
 
+impl Status {
+    /// This status without its untracked entries, for views that hide files
+    /// git does not track. Staged new files are in the index, so they stay.
+    pub fn without_untracked(self) -> Self {
+        let unstaged = self
+            .unstaged
+            .into_iter()
+            .filter(|entry| entry.letter != 'U')
+            .collect();
+        Self { unstaged, ..self }
+    }
+}
+
 #[derive(Clone)]
 pub struct Git {
     root: PathBuf,
@@ -153,6 +166,12 @@ impl Git {
 
     pub fn stage_all(&self) -> Result<(), String> {
         run_in(&self.root, &["add", "-A"]).map(drop)
+    }
+
+    /// Stage every change to a tracked file and leave untracked files alone:
+    /// "stage all" while untracked files are hidden from view.
+    pub fn stage_tracked(&self) -> Result<(), String> {
+        run_in(&self.root, &["add", "-u"]).map(drop)
     }
 
     /// Whether HEAD resolves to a real commit — false only on an unborn
@@ -2043,6 +2062,68 @@ mod tests {
         let outside = std::env::temp_dir().join("stage-boundary-other");
         let error = git.stage_under(&outside).unwrap_err();
         assert!(error.contains("outside repository"), "{error}");
+    }
+
+    #[test]
+    fn without_untracked_keeps_every_tracked_change() {
+        let status = parse_status(
+            "## main\0 M src/app.rs\0A  new.rs\0?? notes.md\0 D gone.rs\0UU merge.rs\0",
+        )
+        .without_untracked();
+        let unstaged: Vec<&str> = status.unstaged.iter().map(|e| e.path.as_str()).collect();
+        assert!(!unstaged.contains(&"notes.md"), "{unstaged:?}");
+        assert!(unstaged.contains(&"src/app.rs") && unstaged.contains(&"gone.rs"));
+        assert!(unstaged.contains(&"merge.rs"), "conflicts stay");
+        assert_eq!(
+            status
+                .staged
+                .iter()
+                .map(|e| e.path.as_str())
+                .collect::<Vec<_>>(),
+            ["new.rs"],
+            "a staged new file is tracked and stays"
+        );
+    }
+
+    #[test]
+    fn stage_tracked_leaves_untracked_files_alone() {
+        let git = repo_with_head("stage-tracked");
+        std::fs::write(git.root.join("kept.rs"), "v1").unwrap();
+        run_in(&git.root, &["add", "kept.rs"]).unwrap();
+        run_in(
+            &git.root,
+            &[
+                "-c",
+                "user.email=t@t.dev",
+                "-c",
+                "user.name=t",
+                "commit",
+                "-q",
+                "-m",
+                "kept",
+            ],
+        )
+        .unwrap();
+        std::fs::write(git.root.join("kept.rs"), "v2").unwrap();
+        std::fs::write(git.root.join("scratch.rs"), "").unwrap();
+
+        git.stage_tracked().unwrap();
+
+        let status = git.status().unwrap();
+        assert_eq!(
+            paths_under(&status, None),
+            ["scratch.rs"],
+            "only the untracked file is left"
+        );
+        assert_eq!(
+            status
+                .staged
+                .iter()
+                .map(|e| e.path.as_str())
+                .collect::<Vec<_>>(),
+            ["kept.rs"]
+        );
+        let _ = std::fs::remove_dir_all(&git.root);
     }
 
     #[test]

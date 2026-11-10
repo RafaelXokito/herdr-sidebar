@@ -115,7 +115,7 @@ folder stays put until that pane changes directory again.
 | `Ctrl+P` | quick open | `A` | draft message |
 | `Ctrl+F` | content search | `S` | sync |
 | `.` | hidden files | `o` | open diff |
-| `u` | untracked + ignored files | | |
+| `u` | hide untracked + ignored files (shared with Source Control's settings) | | |
 | `r` | refresh | `r` | refresh |
 | `m` | context menu | `m` | context menu |
 | `s` | settings | `s` | settings |

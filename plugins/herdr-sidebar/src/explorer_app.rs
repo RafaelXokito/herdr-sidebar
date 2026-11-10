@@ -468,7 +468,11 @@ impl App {
         let other_exe = std::env::current_exe().ok();
         let sidebar_state = sidebar::load_state();
         set_color_theme(sidebar_state.color_theme);
-        let repos = if sidebar_state.git_deco || sidebar_state.show_git_footer {
+        tree.hide_untracked = sidebar_state.hide_untracked;
+        let repos = if sidebar_state.git_deco
+            || sidebar_state.show_git_footer
+            || sidebar_state.hide_untracked
+        {
             Git::discover_all(&tree.root_path())
         } else {
             Vec::new()
@@ -572,6 +576,10 @@ impl App {
             if let Some(ctl) = &self.pane_ctl {
                 ctl.resize_preferred(self.last_width, shared.sidebar_width, shared.dock_right);
             }
+        }
+        if shared.hide_untracked != self.tree.hide_untracked {
+            // Toggled from Source Control or another Explorer.
+            self.set_hide_untracked(shared.hide_untracked);
         }
         let enabled = shared.git_deco;
         if enabled == self.sidebar_state.git_deco && old_git_footer == shared.show_git_footer {
@@ -770,11 +778,21 @@ impl App {
         };
     }
 
-    /// Show or hide files git does not track (untracked and ignored). Rows
-    /// drop out once the background scan reports which paths those are.
+    /// Show or hide files git does not track (untracked and ignored). The
+    /// setting is shared, so Source Control and other sidebars follow.
     fn toggle_untracked(&mut self) {
-        self.tree.hide_untracked = !self.tree.hide_untracked;
-        if !self.tree.hide_untracked {
+        self.sidebar_state = sidebar::update_state(|state| {
+            state.hide_untracked = !state.hide_untracked;
+        });
+        self.set_hide_untracked(self.sidebar_state.hide_untracked);
+    }
+
+    /// Apply the shared setting. Rows drop out once the background scan
+    /// reports which paths git does not track.
+    fn set_hide_untracked(&mut self, hide: bool) {
+        self.sidebar_state.hide_untracked = hide;
+        self.tree.hide_untracked = hide;
+        if !hide {
             self.tree.set_excluded(Vec::new());
         }
         self.rediscover_repos();
