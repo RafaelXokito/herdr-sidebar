@@ -1608,7 +1608,18 @@ mod tests {
             "a second process must skip an outstanding scan"
         );
         drop(first);
-        IgnoredScanLock::acquire(&root).unwrap();
+        // Other tests spawn `git` in parallel, and a child forked before it
+        // execs still shares every open file of this process, the lock among
+        // them, until exec closes it. So the release can take a moment to
+        // become visible; it must still happen.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while let Err(e) = IgnoredScanLock::acquire(&root) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the lock was never released: {e}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]

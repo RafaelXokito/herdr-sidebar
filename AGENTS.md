@@ -37,6 +37,11 @@ CI uses the LATEST stable toolchain (`dtolnay/rust-toolchain@stable`), so a stal
 `try_update`, which is also newer than our `rust-version = 1.89` MSRV — rewrite instead of
 renaming). Run `rustup update stable` (or `cargo +<latest> clippy`) before tagging a release.
 
+Tests run in parallel and many spawn `git`. A child forked before it execs shares every
+open file of the test process, so a `flock` the test just dropped can stay held for a moment
+(`ignored_scan_lock_is_single_flight` failed about 1 run in 20 until it retried the
+re-acquire). A test that asserts a lock is released must allow a short retry.
+
 `plugins/herdr-sidebar/scripts/.gitattributes` pins every shell script to LF. The
 repository has Windows contributors and `core.autocrlf` is common, but these files are
 executed by Bash on Linux/macOS and mixed or CRLF endings fail before the launcher runs.
